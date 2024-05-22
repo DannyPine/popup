@@ -30,6 +30,7 @@ import {
 import {usePortalContext} from './FloatingPortal';
 import {useFloatingTree} from './FloatingTree';
 import {FocusGuard, HIDDEN_STYLES} from './FocusGuard';
+import {useEffectEvent} from '../hooks/utils/useEffectEvent';
 
 const LIST_LIMIT = 20;
 let previouslyFocusedElements: Element[] = [];
@@ -113,6 +114,12 @@ export interface FloatingFocusManagerProps {
    */
   returnFocus?: boolean;
   /**
+   * Determines if focus should be restored to the nearest tabbable element if
+   * focus inside the floating element is lost (such as due to the removal of
+   * the currently focused element from the DOM).
+   */
+  restoreFocus?: boolean;
+  /**
    * Determines if focus is “modal”, meaning focus is fully trapped inside the
    * floating element and outside content cannot be accessed. This includes
    * screen reader virtual cursors.
@@ -153,6 +160,7 @@ export function FloatingFocusManager(
     guards: _guards = true,
     initialFocus = 0,
     returnFocus = true,
+    restoreFocus = true,
     modal = true,
     visuallyHiddenDismiss = false,
     closeOnFocusOut = true,
@@ -191,40 +199,38 @@ export function FloatingFocusManager(
   const endDismissButtonRef = React.useRef<HTMLButtonElement>(null);
   const preventReturnFocusRef = React.useRef(false);
   const isPointerDownRef = React.useRef(false);
+  const tabbableIndexRef = React.useRef(-1);
 
   const isInsidePortal = portalContext != null;
 
-  const getTabbableContent = React.useCallback(
+  const getTabbableContent = useEffectEvent(
     (container: HTMLElement | null = floating) => {
       return container ? tabbable(container, getTabbableOptions()) : [];
     },
-    [floating],
   );
 
-  const getTabbableElements = React.useCallback(
-    (container?: HTMLElement) => {
-      const content = getTabbableContent(container);
+  const getTabbableElements = useEffectEvent((container?: HTMLElement) => {
+    const content = getTabbableContent(container);
 
-      return orderRef.current
-        .map((type) => {
-          if (domReference && type === 'reference') {
-            return domReference;
-          }
+    return orderRef.current
+      .map((type) => {
+        if (domReference && type === 'reference') {
+          return domReference;
+        }
 
-          if (floating && type === 'floating') {
-            return floating;
-          }
+        if (floating && type === 'floating') {
+          return floating;
+        }
 
-          return content;
-        })
-        .filter(Boolean)
-        .flat() as Array<FocusableElement>;
-    },
-    [domReference, floating, orderRef, getTabbableContent],
-  );
+        return content;
+      })
+      .filter(Boolean)
+      .flat() as Array<FocusableElement>;
+  });
 
   React.useEffect(() => {
-    if (disabled || !modal) return;
+    if (disabled) return;
+    if (!modal) return;
 
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Tab') {
@@ -277,7 +283,28 @@ export function FloatingFocusManager(
   ]);
 
   React.useEffect(() => {
-    if (disabled || !closeOnFocusOut) return;
+    if (disabled) return;
+    if (!floating) return;
+
+    function handleFocusIn(event: FocusEvent) {
+      const target = getTarget(event) as Element | null;
+      const tabbableContent = getTabbableContent() as Array<Element | null>;
+      const tabbableIndex = tabbableContent.indexOf(target);
+      if (tabbableIndex !== -1) {
+        tabbableIndexRef.current = tabbableIndex;
+      }
+    }
+
+    floating.addEventListener('focusin', handleFocusIn);
+
+    return () => {
+      floating.removeEventListener('focusin', handleFocusIn);
+    };
+  }, [disabled, floating, getTabbableContent]);
+
+  React.useEffect(() => {
+    if (disabled) return;
+    if (!closeOnFocusOut) return;
 
     // In Safari, buttons lose focus when pressing them.
     function handlePointerDown() {
@@ -310,9 +337,33 @@ export function FloatingFocusManager(
               )))
         );
 
+        // Restore focus to the previous tabbable element index to prevent
+        // focus from being lost outside the floating tree.
+        if (
+          restoreFocus &&
+          movedToUnrelatedNode &&
+          activeElement(getDocument(floating)) === getDocument(floating).body
+        ) {
+          // Let `FloatingPortal` effect knows that focus is still inside the
+          // floating tree.
+          floating?.focus();
+
+          const prevTabbableIndex = tabbableIndexRef.current;
+          const tabbableContent = getTabbableContent() as Array<Element | null>;
+          const nodeToFocus =
+            tabbableContent[prevTabbableIndex] ||
+            tabbableContent[tabbableContent.length - 1] ||
+            floating;
+
+          if (isHTMLElement(nodeToFocus)) {
+            nodeToFocus.focus();
+          }
+        }
+
         // Focus did not move inside the floating tree, and there are no tabbable
         // portal guards to handle closing.
         if (
+          !modal &&
           relatedTarget &&
           movedToUnrelatedNode &&
           !isPointerDownRef.current &&
@@ -328,12 +379,12 @@ export function FloatingFocusManager(
     if (floating && isHTMLElement(domReference)) {
       domReference.addEventListener('focusout', handleFocusOutside);
       domReference.addEventListener('pointerdown', handlePointerDown);
-      !modal && floating.addEventListener('focusout', handleFocusOutside);
+      floating.addEventListener('focusout', handleFocusOutside);
 
       return () => {
         domReference.removeEventListener('focusout', handleFocusOutside);
         domReference.removeEventListener('pointerdown', handlePointerDown);
-        !modal && floating.removeEventListener('focusout', handleFocusOutside);
+        floating.removeEventListener('focusout', handleFocusOutside);
       };
     }
   }, [
@@ -346,6 +397,8 @@ export function FloatingFocusManager(
     portalContext,
     onOpenChange,
     closeOnFocusOut,
+    restoreFocus,
+    getTabbableContent,
   ]);
 
   React.useEffect(() => {
@@ -390,7 +443,8 @@ export function FloatingFocusManager(
   ]);
 
   useModernLayoutEffect(() => {
-    if (disabled || !floating) return;
+    if (disabled) return;
+    if (!floating) return;
 
     const doc = getDocument(floating);
     const previouslyFocusedElement = activeElement(doc);
@@ -422,7 +476,8 @@ export function FloatingFocusManager(
   ]);
 
   useModernLayoutEffect(() => {
-    if (disabled || !floating) return;
+    if (disabled) return;
+    if (!floating) return;
 
     let preventReturnFocusScroll = false;
 
@@ -520,7 +575,8 @@ export function FloatingFocusManager(
   // Synchronize the `context` & `modal` value to the FloatingPortal context.
   // It will decide whether or not it needs to render its own guards.
   useModernLayoutEffect(() => {
-    if (disabled || !portalContext) return;
+    if (disabled) return;
+    if (!portalContext) return;
 
     portalContext.setFocusManagerState({
       modal,
@@ -544,21 +600,24 @@ export function FloatingFocusManager(
   ]);
 
   useModernLayoutEffect(() => {
-    if (
-      disabled ||
-      !floating ||
-      typeof MutationObserver !== 'function' ||
-      ignoreInitialFocus
-    ) {
-      return;
-    }
+    if (disabled) return;
+    if (!floating) return;
+    if (typeof MutationObserver !== 'function') return;
+    if (ignoreInitialFocus) return;
 
     const handleMutation = () => {
       const tabIndex = floating.getAttribute('tabindex');
+      const tabbableContent = getTabbableContent() as Array<Element | null>;
+      const activeEl = activeElement(getDocument(floating));
+      const tabbableIndex = tabbableContent.indexOf(activeEl);
+
+      if (tabbableIndex !== -1) {
+        tabbableIndexRef.current = tabbableIndex;
+      }
+
       if (
         orderRef.current.includes('floating') ||
-        (activeElement(getDocument(floating)) !== refs.domReference.current &&
-          getTabbableContent().length === 0)
+        (activeEl !== refs.domReference.current && tabbableContent.length === 0)
       ) {
         if (tabIndex !== '0') {
           floating.setAttribute('tabindex', '0');
